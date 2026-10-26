@@ -41,7 +41,7 @@ OPTIONAL = {
 }
 # states that go straight into another state when their timer ends
 FOLLOW = {
-    "sleepy": ("sleep", 10000, 25000),
+    "sleepy": ("sleep", 6000, 12000),
     "sleep": ("stretch", 2200, 2200),
     "pounce": ("idle", 1500, 3000),
     "rage": ("idle", 1500, 2500),
@@ -107,6 +107,7 @@ class Pet(QWidget):
         self.vx = 0.0
         self.vy = 0.0
         self.facing = 1           # 1 = right, -1 = left
+        self.speed = WALK_SPEED
         self.walk_target = self.cx
         self.step_off = False
         self.jump = None
@@ -228,34 +229,35 @@ class Pet(QWidget):
             fn()
 
     def next_state(self):
+        """Pick something to do. Short pauses so she is always up to something."""
         r = random.random()
-        if r < 0.30:
+        if r < 0.27:
             self.start_walk()
-        elif r < 0.55:
+        elif r < 0.49:
             if not self.start_hop():
                 self.start_walk()
-        elif r < 0.62:
-            self.set_state("sit", 6000, 15000)
-        elif r < 0.67:
-            self.set_state("sleepy", 3000, 4000)
-        elif r < 0.72:
-            self.set_state("wave", 2600, 2600)
-        elif r < 0.76:
-            self.set_state("phone", 8000, 16000)
-        elif r < 0.80:
-            self.set_state("coffee", 8000, 16000)
-        elif r < 0.84:
-            self.set_state("lie_down", 8000, 16000)
-        elif r < 0.87:
-            self.set_state("peek", 4000, 8000)
-        elif r < 0.90:
-            self.set_state("stretch", 2200, 2200)
-        elif r < 0.93:
+        elif r < 0.55:
             self.start_stalk()
-        elif r < 0.94:
+        elif r < 0.60:
+            self.set_state("sit", 4000, 8000)
+        elif r < 0.65:
+            self.set_state("phone", 5000, 9000)
+        elif r < 0.69:
+            self.set_state("coffee", 5000, 9000)
+        elif r < 0.72:
+            self.set_state("lie_down", 5000, 9000)
+        elif r < 0.76:
+            self.set_state("peek", 3000, 5000)
+        elif r < 0.79:
+            self.set_state("stretch", 2200, 2200)
+        elif r < 0.83:
+            self.set_state("wave", 2600, 2600)
+        elif r < 0.85:
             self.set_state("chaos", 2200, 2800)
+        elif r < 0.88:
+            self.set_state("sleepy", 3000, 4000)
         else:
-            self.set_state("idle", 3000, 7000)
+            self.set_state("idle", 1000, 3000)
 
     def start_stalk(self):
         """Sneak up on the mouse cursor and pounce on it."""
@@ -266,6 +268,7 @@ class Pet(QWidget):
             self.step_off = False
             self.walk_target = float(c.x())
             self.pounce_next = True
+            self.speed = WALK_SPEED * 2.0
             self.state = "walk"
         else:
             self.start_walk()
@@ -274,16 +277,17 @@ class Pet(QWidget):
         p = self.current_platform()
         lo, hi = self.span(p)
         if hi - lo < 40:
-            self.set_state("idle", 2000, 4000)
+            self.set_state("idle", 800, 1500)
             return
         self.step_off = False
         self.pounce_next = False
+        self.speed = WALK_SPEED * (2.4 if random.random() < 0.25 else 1.0)   # sometimes a dash
         if self.plat_id and random.random() < 0.3:
             self.step_off = True                         # walk to the edge and drop off
             self.walk_target = random.choice([lo, hi])
         else:
             self.walk_target = random.uniform(lo, hi)
-            if abs(self.walk_target - self.cx) < 80:
+            if abs(self.walk_target - self.cx) < 250:      # go somewhere properly far
                 self.walk_target = lo if self.cx - lo > hi - self.cx else hi
         self.state = "walk"
 
@@ -291,7 +295,7 @@ class Pet(QWidget):
         p = self.current_platform()
         lo, hi = self.span(p)
         dx = self.walk_target - self.cx
-        if abs(dx) <= WALK_SPEED:
+        if abs(dx) <= self.speed:
             self.cx = self.walk_target
             if self.plat_id:
                 self.plat_off = self.cx - p["left"]
@@ -303,10 +307,10 @@ class Pet(QWidget):
                 self.pounce_next = False
                 self.set_state("pounce", 900, 900)
             else:
-                self.set_state("idle", 2000, 5000)
+                self.set_state("idle", 500, 1500)
             return
         self.facing = 1 if dx > 0 else -1
-        self.cx = clamp(self.cx + WALK_SPEED * self.facing, lo, hi)
+        self.cx = clamp(self.cx + self.speed * self.facing, lo, hi)
         if self.plat_id:
             self.plat_off = self.cx - p["left"]
         self.sync_window()
@@ -429,7 +433,7 @@ class Pet(QWidget):
         if s == "wave":
             return "wave" if (ms // 350) % 2 == 0 else "idle"
         if s == "walk":
-            return "walk" if (ms // 180) % 2 == 0 else "walk_2"
+            return "walk" if (ms // (180 if self.speed <= WALK_SPEED else 100)) % 2 == 0 else "walk_2"
         if s == "drag":
             return "drag_a" if (ms // 220) % 2 == 0 else "drag_b"
         if s == "sit":

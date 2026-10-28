@@ -56,7 +56,7 @@ MOOD_STATE = {
     "sing": "music", "neutral": "wave",
 }
 NO_BOB = ("fall", "jump", "land", "crouch", "peek", "lie_down", "pounce")
-FACES_DIRECTION = {"walk", "walk_2", "jump", "sit_edge", "crouch", "air", "landf"}   # mirrored when facing left
+FACES_DIRECTION = {"walk", "walk_2", "jump", "sit_edge", "crouch", "air"}   # mirrored when facing left
 
 # frame-by-frame animations: <file prefix>_f01.png, _f02.png, ...  ->  (frames per second, how it plays)
 ANIMS = {
@@ -65,7 +65,7 @@ ANIMS = {
     "air": (12, "pingpong"),      # rest of the arc / floating (forward then backward = smooth loop)
     "fallstart": (24, "once"),    # the "uh oh" moment when a fall begins
     "fall": (24, "loop"),         # flailing while falling
-    "land": (24, "once"),         # landing (drop land_f01.png, land_f02.png ... into sprites to use it)
+    "land": (30, "once"),         # landing (drop land_f01.png, land_f02.png ... into sprites to use it)
 }
 CROUCH_MS = 270                   # how long she winds up before a hop
 TAKEOFF_PART = 0.35               # first 35% of the arc uses the take-off frames
@@ -386,7 +386,7 @@ class Pet(QWidget):
         self.plat_off = self.cx - p["left"]
         self.vx = self.vy = 0.0
         if "land" in self.anims:
-            ms = int(clamp(len(self.anims["land"]) * 1000 / ANIMS["land"][0], 250, 1500))
+            ms = int(clamp(len(self.anims["land"]) * 1000 / ANIMS["land"][0], 250, 2500))
         else:
             ms = 250
         self.set_state("land", ms, ms)

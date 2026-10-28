@@ -55,8 +55,18 @@ MOOD_STATE = {
     "surprised": "surprised", "sleepy": "sleepy", "smug": "chaos",
     "sing": "music", "neutral": "wave",
 }
-NO_BOB = ("fall", "jump", "land", "peek", "lie_down", "pounce")
-FACES_DIRECTION = {"walk", "walk_2", "jump", "sit_edge"}   # mirrored when facing left
+NO_BOB = ("fall", "jump", "land", "crouch", "peek", "lie_down", "pounce")
+FACES_DIRECTION = {"walk", "walk_2", "jump", "sit_edge", "crouch", "air", "landf"}   # mirrored when facing left
+
+# frame-by-frame animations: <file prefix>_f01.png, _f02.png, ...  ->  (frames per second, how it plays)
+ANIMS = {
+    "crouch": (24, "once"),       # wind-up before a hop
+    "jump": (24, "once"),         # take-off, first part of the arc
+    "air": (12, "pingpong"),      # rest of the arc / floating (forward then backward = smooth loop)
+    "land": (24, "once"),         # landing (drop land_f01.png, land_f02.png ... into sprites to use it)
+}
+CROUCH_MS = 270                   # how long she winds up before a hop
+TAKEOFF_PART = 0.35               # first 35% of the arc uses the take-off frames
 
 SIZE = 200                        # sprite size on screen (px)
 HEADROOM = 24                     # spare space above her for bouncing
@@ -103,6 +113,19 @@ class Pet(QWidget):
             self.frames[key] = self.load(SPRITES / f"walk_f{i:02d}.png")
             self.walk_frames.append(key)
             i += 1
+        # other animations from ANIMS (missing files = that animation is skipped)
+        self.anims = {}
+        for prefix in ANIMS:
+            keyname = "landf" if prefix == "land" else prefix
+            keys = []
+            i = 1
+            while (SPRITES / f"{prefix}_f{i:02d}.png").exists():
+                key = f"{keyname}@{i - 1}"
+                self.frames[key] = self.load(SPRITES / f"{prefix}_f{i:02d}.png")
+                keys.append(key)
+                i += 1
+            if keys:
+                self.anims[prefix] = keys
         for n in list(self.frames):
             self.frames[n + "_L"] = self.frames[n].transformed(QTransform().scale(-1, 1))
 
@@ -149,6 +172,9 @@ class Pet(QWidget):
         self.next_blink = 2000
         self.clicks = []
         self.pounce_next = False
+        self.pending_jump = None
+        self.state_t0 = 0
+        self.prev_state = None
 
         # ---- chat ----
         self.chat = None
@@ -355,7 +381,11 @@ class Pet(QWidget):
         self.feet = p["top"]
         self.plat_off = self.cx - p["left"]
         self.vx = self.vy = 0.0
-        self.set_state("land", 250, 250)
+        if "land" in self.anims:
+            ms = int(clamp(len(self.anims["land"]) * 1000 / ANIMS["land"][0], 250, 1500))
+        else:
+            ms = 250
+        self.set_state("land", ms, ms)
         self.sync_window()
 
     def step_fall(self):
@@ -390,7 +420,9 @@ class Pet(QWidget):
             for _ in range(6):
                 tx = random.uniform(lo, hi)
                 if not self.covered(p, tx):
-                    self.begin_jump(p, tx)
+                    self.pending_jump = (p["id"], tx)      # crouch first, then jump
+                    self.facing = 1 if tx > self.cx else -1
+                    self.set_state("crouch", CROUCH_MS, CROUCH_MS)
                     return True
         return False
 
@@ -441,7 +473,9 @@ class Pet(QWidget):
         elif self.state == "walk":
             self.step_walk()
         elif self.now_ms() >= self.state_until:
-            if self.state in FOLLOW:
+            if self.state == "crouch":
+                self.finish_crouch()
+            elif self.state in FOLLOW:
                 self.set_state(*FOLLOW[self.state])
             else:
                 self.next_state()
@@ -449,8 +483,37 @@ class Pet(QWidget):
         if self.state == "idle" and self.now_ms() >= self.next_blink:
             self.blink_until = self.now_ms() + 160
             self.next_blink = self.now_ms() + random.randint(2500, 6000)
+        if self.state != self.prev_state:          # remember when each state started (for animations)
+            self.prev_state = self.state
+            self.state_t0 = self.now_ms()
         self.follow_chat()
         self.update()
+
+    def finish_crouch(self):
+        target = self.pending_jump
+        self.pending_jump = None
+        p = self.find_platform(target[0]) if target else None
+        if p is None:
+            self.set_state("idle", 800, 1500)        # the window went away while she crouched
+            return
+        lo, hi = self.span(p)
+        self.begin_jump(p, clamp(target[1], lo, hi))
+
+    def anim_frame(self, name, elapsed_ms):
+        keys = self.anims[name]
+        fps, mode = ANIMS[name]
+        i = int(max(elapsed_ms, 0) * fps / 1000)
+        n = len(keys)
+        if mode == "once":
+            i = min(i, n - 1)
+        elif mode == "pingpong" and n > 1:
+            period = 2 * n - 2
+            i %= period
+            if i >= n:
+                i = period - i
+        else:
+            i %= n
+        return keys[i]
 
     # ---------- drawing ----------
     def sprite_name(self):
@@ -463,6 +526,22 @@ class Pet(QWidget):
             return self.walk_frames[int(ms // frame_ms) % len(self.walk_frames)]
         if s == "walk":
             return "walk" if (ms // (180 if self.speed <= WALK_SPEED else 100)) % 2 == 0 else "walk_2"
+        elapsed = ms - self.state_t0
+        if s == "crouch":
+            return self.anim_frame("crouch", elapsed) if "crouch" in self.anims else "land"
+        if s == "jump" and self.jump is not None:
+            u = (ms - self.jump["t0"]) / self.jump["dur"]
+            if u < TAKEOFF_PART and "jump" in self.anims:
+                return self.anim_frame("jump", elapsed)
+            if "air" in self.anims:
+                return self.anim_frame("air", elapsed - self.jump["dur"] * TAKEOFF_PART)
+            return "jump"
+        if s == "land":
+            if "land" in self.anims:
+                return self.anim_frame("land", elapsed)
+            if "crouch" in self.anims:
+                return self.anim_frame("crouch", elapsed)   # stand-in until the landing animation exists
+            return "land"
         if s == "drag":
             return "drag_a" if (ms // 220) % 2 == 0 else "drag_b"
         if s == "sit":

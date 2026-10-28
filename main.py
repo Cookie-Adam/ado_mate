@@ -65,13 +65,24 @@ ANIMS = {
     "air": (12, "pingpong"),      # rest of the arc / floating (forward then backward = smooth loop)
     "fallstart": (24, "once"),    # the "uh oh" moment when a fall begins
     "fall": (24, "loop"),         # flailing while falling
-    "land": (30, "once"),         # landing (drop land_f01.png, land_f02.png ... into sprites to use it)
+    "land": (30, "once"),
+    "drag": (24, "loop"),         # dangling while you hold her
+    "dragbin": (24, "once"),      # shake her: she starts to panic
+    "dragb": (24, "loop"),        # panicking while you keep shaking
+    "dragbout": (24, "once"),     # you stop shaking: she gives up...
+    "dragbl": (24, "pingpong"),   # ...and hangs there limp until you let go         # landing (drop land_f01.png, land_f02.png ... into sprites to use it)
 }
+SHAKE_WINDOW = 15                 # ticks (~0.5 s) of cursor movement looked at for shaking
+SHAKE_START = 250                 # back-and-forth distance (px) in that window that makes her panic
+SHAKE_CALM = 80                   # total movement (px) below which she starts calming down
+XFADE_MS = 160                    # quick cross-fade between drag animations
 CROUCH_MS = 270                   # how long she winds up before a hop
 TAKEOFF_PART = 0.35               # first 35% of the arc uses the take-off frames
 
 SIZE = 200                        # sprite size on screen (px)
-HEADROOM = 24                     # spare space above her for bouncing
+HEADROOM = 40                     # spare space above her (bouncing, swinging)
+MARGIN = 90                       # spare space left and right so swinging never clips her
+GRAB_POINT = (MARGIN + SIZE / 2, HEADROOM + 6)   # where the cursor holds her while dragging (her pinched jacket)
 FEET_PAD = round(16 / 413 * SIZE) # transparent gap under her feet in the sprite files
 TICK_MS = 33                      # about 30 frames per second
 WALK_SPEED = 2.0                  # pixels per tick, matched to her feet in the walk video
@@ -98,7 +109,7 @@ class Pet(QWidget):
             Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool
         )
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setFixedSize(SIZE, SIZE + HEADROOM)
+        self.setFixedSize(SIZE + 2 * MARGIN, SIZE + HEADROOM)
 
         # ---- sprites (missing new ones fall back to existing ones) ----
         self.frames = {}
@@ -175,6 +186,13 @@ class Pet(QWidget):
         self.clicks = []
         self.pounce_next = False
         self.pending_jump = None
+        self.drag_mode = "a"
+        self.drag_t0 = 0
+        self.shake = 0.0
+        self.trail = []
+        self.calm_ticks = 0
+        self.want_out = False
+        self.xfade = None
         self.land_kind = "fall"
         self.state_t0 = 0
         self.prev_state = None
@@ -202,7 +220,7 @@ class Pet(QWidget):
         return self.t * TICK_MS
 
     def sync_window(self):
-        self.move(round(self.cx - SIZE / 2),
+        self.move(round(self.cx - SIZE / 2 - MARGIN),
                   round(self.feet - SIZE - HEADROOM + FEET_PAD))
 
     def find_platform(self, pid):
@@ -466,6 +484,13 @@ class Pet(QWidget):
             self.refresh_platforms()
 
         if self.dragging:
+            if "drag" in self.anims:
+                # slide her so the pinched jacket ends up right under the cursor
+                gx, gy = GRAB_POINT
+                self.drag_offset[0] += (gx - self.drag_offset[0]) * 0.3
+                self.drag_offset[1] += (gy - self.drag_offset[1]) * 0.3
+                self.place_under_cursor()
+            self.step_drag_mode()
             target = clamp(self.mvx * 1.5, -25, 25)
             self.sway += (target - self.sway) * 0.2
             self.mvx *= 0.8
@@ -492,6 +517,53 @@ class Pet(QWidget):
             self.state_t0 = self.now_ms()
         self.follow_chat()
         self.update()
+
+    # ---------- drag_a (calm) / drag_b (panic) ----------
+    DRAG_ANIM = {"a": "drag", "b_in": "dragbin", "b": "dragb", "b_out": "dragbout", "limp": "dragbl"}
+
+    def set_drag_mode(self, mode, fade=False):
+        if fade:
+            self.xfade = (self.current_frame(), self.now_ms())
+        self.drag_mode = mode
+        self.drag_t0 = self.now_ms()
+
+    def anim_done(self, name, elapsed):
+        return elapsed >= len(self.anims[name]) * 1000 / ANIMS[name][0]
+
+    def measure_shake(self):
+        """Shaking = lots of cursor movement that doesn't go anywhere (back and forth)."""
+        self.trail.append(self.drag_prev)
+        if len(self.trail) > SHAKE_WINDOW:
+            self.trail.pop(0)
+        path = sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(self.trail, self.trail[1:]))
+        first, last = self.trail[0], self.trail[-1]
+        net = math.hypot(last[0] - first[0], last[1] - first[1])
+        self.shake = path - net
+        return path
+
+    def step_drag_mode(self):
+        path = self.measure_shake()
+        if not all(k in self.anims for k in ("dragbin", "dragb", "dragbout", "dragbl")):
+            return
+        m = self.drag_mode
+        el = self.now_ms() - self.drag_t0
+        if m == "a" and self.shake > SHAKE_START:
+            self.set_drag_mode("b_in", fade=True)
+        elif m == "b_in" and self.anim_done("dragbin", el):
+            self.set_drag_mode("b")
+        elif m == "b":
+            self.calm_ticks = self.calm_ticks + 1 if path < SHAKE_CALM else 0
+            if self.calm_ticks >= 10:
+                self.want_out = True
+            n = len(self.anims["dragb"])
+            if self.want_out and int(el * ANIMS["dragb"][0] / 1000) % n == n - 1:
+                self.want_out = False                       # leave at the end of a loop = no jump
+                self.set_drag_mode("b_out")
+        elif m == "b_out" and self.anim_done("dragbout", el):
+            self.set_drag_mode("limp")
+        elif m == "limp" and self.shake > SHAKE_START:
+            self.calm_ticks = 0
+            self.set_drag_mode("b", fade=True)
 
     def finish_crouch(self):
         target = self.pending_jump
@@ -556,6 +628,11 @@ class Pet(QWidget):
                 return self.anim_frame("fall", elapsed - start_ms)
             return "fall"
         if s == "drag":
+            name = self.DRAG_ANIM.get(self.drag_mode, "drag")
+            if name in self.anims:
+                return self.anim_frame(name, ms - self.drag_t0)
+            if "drag" in self.anims:
+                return self.anim_frame("drag", elapsed)
             return "drag_a" if (ms // 220) % 2 == 0 else "drag_b"
         if s == "sit":
             return "sit_edge" if self.plat_id else "sit"
@@ -574,6 +651,7 @@ class Pet(QWidget):
     def paintEvent(self, _):
         sec = self.now_ms() / 1000
         p = QPainter(self)
+        p.translate(MARGIN, 0)                     # her drawing area sits in the middle of the window
         p.setRenderHint(QPainter.SmoothPixmapTransform)
         pm = self.current_frame()
         if self.state == "drag":
@@ -581,6 +659,14 @@ class Pet(QWidget):
             p.translate(SIZE / 2, HEADROOM)
             p.rotate(self.sway + math.sin(sec * 3) * 3)
             p.drawPixmap(-SIZE // 2, 0, pm)
+            if self.xfade is not None:                      # fade out the previous animation's frame
+                old, t0 = self.xfade
+                k = (self.now_ms() - t0) / XFADE_MS
+                if k >= 1:
+                    self.xfade = None
+                else:
+                    p.setOpacity(1 - k)
+                    p.drawPixmap(-SIZE // 2, 0, old)
             return
         if self.state == "music" and self.sprite_name() == "headbang":
             # headbang: rock from the feet and bounce to the beat
@@ -606,7 +692,8 @@ class Pet(QWidget):
             self.pressed = True
             self.press_pos = e.globalPosition()
             self.drag_prev = (e.globalPosition().x(), e.globalPosition().y())
-            self.drag_offset = e.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            off = e.globalPosition() - self.frameGeometry().topLeft().toPointF()
+            self.drag_offset = [off.x(), off.y()]     # eases towards GRAB_POINT once she's picked up
 
     def mouseMoveEvent(self, e):
         if not self.pressed:
@@ -623,13 +710,24 @@ class Pet(QWidget):
             self.mvx = self.mvy = 0.0
             self.sway = 0.0
             self.state = "drag"
+            self.drag_mode = "a"
+            self.drag_t0 = self.now_ms()
+            self.shake = 0.0
+            self.trail = []
+            self.calm_ticks = 0
+            self.want_out = False
+            self.xfade = None
         self.mvx = clamp(self.mvx + (pos.x() - self.drag_prev[0]) * 0.5, -40, 40)
         self.mvy = clamp(self.mvy + (pos.y() - self.drag_prev[1]) * 0.5, -40, 40)
         self.drag_prev = (pos.x(), pos.y())
-        top_left = pos.toPoint() - self.drag_offset
-        self.move(top_left)
-        self.cx = top_left.x() + SIZE / 2
-        self.feet = top_left.y() + SIZE + HEADROOM - FEET_PAD
+        self.place_under_cursor()
+
+    def place_under_cursor(self):
+        x = self.drag_prev[0] - self.drag_offset[0]
+        y = self.drag_prev[1] - self.drag_offset[1]
+        self.move(round(x), round(y))
+        self.cx = x + MARGIN + SIZE / 2
+        self.feet = y + SIZE + HEADROOM - FEET_PAD
 
     def mouseReleaseEvent(self, e):
         if e.button() != Qt.LeftButton or not self.pressed:

@@ -4,11 +4,13 @@ import random
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QDir, QLockFile, Qt, QTimer
+from PySide6.QtCore import QDir, QLockFile, Qt, QThread, QTimer
 from PySide6.QtGui import QCursor, QGuiApplication, QPainter, QPixmap, QTransform
 from PySide6.QtWidgets import QApplication, QMenu, QWidget
 
+import brain
 import windows_api
+from chat_ui import ChatBox
 
 SPRITES = Path(__file__).parent / "sprites"
 
@@ -47,6 +49,12 @@ FOLLOW = {
     "rage": ("idle", 1500, 2500),
     "chaos": ("idle", 1500, 3000),
 }
+# her mood tag -> which pose she makes for a few seconds
+MOOD_STATE = {
+    "happy": "laughing", "annoyed": "rage", "embarrassed": "blushing",
+    "surprised": "surprised", "sleepy": "sleepy", "smug": "chaos",
+    "sing": "music", "neutral": "wave",
+}
 NO_BOB = ("fall", "jump", "land", "peek", "lie_down", "pounce")
 FACES_DIRECTION = {"walk", "walk_2", "jump", "sit_edge"}   # mirrored when facing left
 
@@ -54,7 +62,8 @@ SIZE = 200                        # sprite size on screen (px)
 HEADROOM = 24                     # spare space above her for bouncing
 FEET_PAD = round(16 / 413 * SIZE) # transparent gap under her feet in the sprite files
 TICK_MS = 33                      # about 30 frames per second
-WALK_SPEED = 2.2                  # pixels per tick
+WALK_SPEED = 2.0                  # pixels per tick, matched to her feet in the walk video
+WALK_FRAME_MS = 1000 / 48         # walk frames play at 48 fps at normal speed
 GRAVITY = 0.8
 MAX_FALL = 24
 MIN_PLATFORM_W = 160              # ignore windows narrower than this
@@ -86,6 +95,14 @@ class Pet(QWidget):
         for n, fallback in OPTIONAL.items():
             path = SPRITES / f"{n}.png"
             self.frames[n] = self.load(path) if path.exists() else self.frames[fallback]
+        # animated walk: walk_f01.png, walk_f02.png, ... (from the video)
+        self.walk_frames = []
+        i = 1
+        while (SPRITES / f"walk_f{i:02d}.png").exists():
+            key = f"walk@{i - 1}"
+            self.frames[key] = self.load(SPRITES / f"walk_f{i:02d}.png")
+            self.walk_frames.append(key)
+            i += 1
         for n in list(self.frames):
             self.frames[n + "_L"] = self.frames[n].transformed(QTransform().scale(-1, 1))
 
@@ -132,6 +149,11 @@ class Pet(QWidget):
         self.next_blink = 2000
         self.clicks = []
         self.pounce_next = False
+
+        # ---- chat ----
+        self.chat = None
+        self.history = brain.load_history()
+        self.job = None
 
         self.sync_window()
         self.refresh_platforms()
@@ -230,6 +252,9 @@ class Pet(QWidget):
 
     def next_state(self):
         """Pick something to do. Short pauses so she is always up to something."""
+        if self.chat is not None and self.chat.isVisible():
+            self.set_state("idle", 1500, 3000)       # stay put while you talk to her
+            return
         r = random.random()
         if r < 0.27:
             self.start_walk()
@@ -424,6 +449,7 @@ class Pet(QWidget):
         if self.state == "idle" and self.now_ms() >= self.next_blink:
             self.blink_until = self.now_ms() + 160
             self.next_blink = self.now_ms() + random.randint(2500, 6000)
+        self.follow_chat()
         self.update()
 
     # ---------- drawing ----------
@@ -432,6 +458,9 @@ class Pet(QWidget):
         ms = self.now_ms()
         if s == "wave":
             return "wave" if (ms // 350) % 2 == 0 else "idle"
+        if s == "walk" and self.walk_frames:
+            frame_ms = WALK_FRAME_MS * WALK_SPEED / max(self.speed, 0.1)   # faster walk = faster legs
+            return self.walk_frames[int(ms // frame_ms) % len(self.walk_frames)]
         if s == "walk":
             return "walk" if (ms // (180 if self.speed <= WALK_SPEED else 100)) % 2 == 0 else "walk_2"
         if s == "drag":
@@ -446,7 +475,7 @@ class Pet(QWidget):
 
     def current_frame(self):
         name = self.sprite_name()
-        if name in FACES_DIRECTION and self.facing == -1:
+        if name.split("@")[0] in FACES_DIRECTION and self.facing == -1:
             name += "_L"
         return self.frames[name]
 
@@ -468,7 +497,7 @@ class Pet(QWidget):
             p.drawPixmap(-SIZE // 2, int(-SIZE - abs(math.sin(sec * 9)) * 6), pm)
             return
         if self.state == "walk":
-            bob = -abs(math.sin(sec * 9)) * 7
+            bob = 0 if self.walk_frames else -abs(math.sin(sec * 9)) * 7
         elif self.state == "music":
             bob = -abs(math.sin(sec * 6)) * 5
         elif self.state == "sleep":
@@ -530,8 +559,83 @@ class Pet(QWidget):
         else:
             self.set_state("laughing", 1500, 1500)
 
+    # ---------- chat ----------
+    def mouseDoubleClickEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            self.open_chat()
+
+    def open_chat(self):
+        if self.chat is None:
+            self.chat = ChatBox()
+            self.chat.submitted.connect(self.send_chat)
+            self.chat.load(self.history)
+        self.follow_chat()
+        self.chat.open_box()
+        if not self.chat.log:
+            self.set_state("wave", 2600, 2600)
+
+    def follow_chat(self):
+        c = self.chat
+        if c is None or not c.isVisible():
+            return
+        x = int(self.cx - c.width() / 2)
+        y = int(self.y() + HEADROOM - c.height() + 10)     # above her head
+        if y < self.geo.top():
+            y = int(self.feet + 8)                         # no room above: go below
+        x = int(clamp(x, self.geo.left(), self.geo.right() - c.width()))
+        y = int(clamp(y, self.geo.top(), self.geo.bottom() - c.height()))
+        if (x, y) != (c.x(), c.y()):
+            c.move(x, y)
+
+    def send_chat(self, text):
+        if self.job is not None:
+            return
+        self.history.append({"role": "user", "content": text})
+        self.chat.add_user(text)
+        self.chat.set_busy(True)
+        if self.state not in ("fall", "jump") and not self.dragging:
+            self.set_state("phone", 120000, 120000)          # "typing a reply"
+
+        thread = QThread()
+        worker = brain.ChatWorker(brain.build_messages(self.history))
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.chunk.connect(self.chat_chunk)
+        worker.finished.connect(self.chat_done)
+        worker.failed.connect(self.chat_failed)
+        for sig in (worker.finished, worker.failed):
+            sig.connect(thread.quit)
+        thread.finished.connect(self.chat_cleanup)
+        self.job = (thread, worker)
+        thread.start()
+
+    def chat_chunk(self, full):
+        self.chat.set_reply(brain.visible_text(full))
+
+    def chat_done(self, full):
+        mood, clean = brain.split_mood(full)
+        self.history.append({"role": "assistant", "content": clean})
+        brain.save_history(self.history)
+        self.chat.set_reply(clean)
+        self.chat.set_busy(False)
+        if self.state not in ("fall", "jump") and not self.dragging:
+            self.set_state(MOOD_STATE.get(mood, "wave"), 3500, 3500)
+        if self.chat.isVisible():
+            self.chat.input.setFocus()
+
+    def chat_failed(self, msg):
+        self.history.pop()                  # drop the unanswered message
+        self.chat.set_error(msg)
+        self.chat.set_busy(False)
+        if self.state == "phone":
+            self.set_state("annoyed", 2500, 2500)
+
+    def chat_cleanup(self):
+        self.job = None
+
     def contextMenuEvent(self, e):
         menu = QMenu(self)
+        menu.addAction("Chat with her", self.open_chat)
         menu.addAction("Play music", lambda: self.command(self.play_music))
         menu.addAction("Wave", lambda: self.command(lambda: self.set_state("wave", 2600, 2600)))
         menu.addAction("Walk somewhere", lambda: self.command(self.start_walk))

@@ -63,6 +63,8 @@ ANIMS = {
     "crouch": (24, "once"),       # wind-up before a hop
     "jump": (24, "once"),         # take-off, first part of the arc
     "air": (12, "pingpong"),      # rest of the arc / floating (forward then backward = smooth loop)
+    "fallstart": (24, "once"),    # the "uh oh" moment when a fall begins
+    "fall": (24, "loop"),         # flailing while falling
     "land": (24, "once"),         # landing (drop land_f01.png, land_f02.png ... into sprites to use it)
 }
 CROUCH_MS = 270                   # how long she winds up before a hop
@@ -173,6 +175,7 @@ class Pet(QWidget):
         self.clicks = []
         self.pounce_next = False
         self.pending_jump = None
+        self.land_kind = "fall"
         self.state_t0 = 0
         self.prev_state = None
 
@@ -377,6 +380,7 @@ class Pet(QWidget):
         self.state = "fall"
 
     def land_on(self, p):
+        self.land_kind = self.state          # "jump" or "fall": picks the right stand-in landing pose
         self.plat_id = p["id"]
         self.feet = p["top"]
         self.plat_off = self.cx - p["left"]
@@ -539,9 +543,18 @@ class Pet(QWidget):
         if s == "land":
             if "land" in self.anims:
                 return self.anim_frame("land", elapsed)
-            if "crouch" in self.anims:
+            if self.land_kind == "jump" and "crouch" in self.anims:
                 return self.anim_frame("crouch", elapsed)   # stand-in until the landing animation exists
             return "land"
+        if s == "fall":
+            start_ms = 0
+            if "fallstart" in self.anims:
+                start_ms = len(self.anims["fallstart"]) * 1000 / ANIMS["fallstart"][0]
+                if elapsed < start_ms:
+                    return self.anim_frame("fallstart", elapsed)
+            if "fall" in self.anims:
+                return self.anim_frame("fall", elapsed - start_ms)
+            return "fall"
         if s == "drag":
             return "drag_a" if (ms // 220) % 2 == 0 else "drag_b"
         if s == "sit":

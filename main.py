@@ -55,8 +55,9 @@ MOOD_STATE = {
     "surprised": "surprised", "sleepy": "sleepy", "smug": "chaos",
     "sing": "music", "neutral": "wave",
 }
-NO_BOB = ("fall", "jump", "land", "crouch", "peek", "lie_down", "pounce")
-FACES_DIRECTION = {"walk", "walk_2", "jump", "sit_edge", "crouch", "air"}   # mirrored when facing left
+BUSY = ("fall", "jump", "climb", "climbtop")   # moving through the air / on a wall: clicks and moods wait
+NO_BOB = ("fall", "jump", "land", "crouch", "climb", "climbtop", "peek", "lie_down", "pounce")
+FACES_DIRECTION = {"walk", "walk_2", "jump", "sit_edge", "crouch", "air", "climb", "climbtop"}   # mirrored when facing left
 
 # frame-by-frame animations: <file prefix>_f01.png, _f02.png, ...  ->  (frames per second, how it plays)
 ANIMS = {
@@ -67,6 +68,8 @@ ANIMS = {
     "fall": (24, "loop"),         # flailing while falling
     "land": (30, "once"),
     "drag": (24, "loop"),         # dangling while you hold her
+    "climb": (36, "loop"),        # climbing up the side of a window
+    "climbtop": (36, "once"),     # reaching the top, climbing over and standing up
     "dragbin": (24, "once"),      # shake her: she starts to panic
     "dragb": (24, "loop"),        # panicking while you keep shaking
     "dragbout": (24, "once"),     # you stop shaking: she gives up...
@@ -76,6 +79,12 @@ SHAKE_WINDOW = 15                 # ticks (~0.5 s) of cursor movement looked at 
 SHAKE_START = 250                 # back-and-forth distance (px) in that window that makes her panic
 SHAKE_CALM = 80                   # total movement (px) below which she starts calming down
 XFADE_MS = 160                    # quick cross-fade between drag animations
+CLIMB_SPEED = 1.13                # average px per tick going up a window's side (matches the video)
+CLIMB_HAND = 35                   # px from her centre to the wall she is climbing
+CLIMB_BLEND = 8                   # the last climb frames are a blend back to the start; the climb-over starts there instead
+CLIMB_REACH = 100                 # she can hang this far below a window's bottom edge (feet below, hands on it)
+CLIMB_JUMP = 300                  # highest jump up to grab the side of a floating window
+CLIMB_TOP = 70                    # when her feet get this close to the top, she pulls herself up
 CROUCH_MS = 270                   # how long she winds up before a hop
 TAKEOFF_PART = 0.35               # first 35% of the arc uses the take-off frames
 
@@ -120,27 +129,45 @@ class Pet(QWidget):
             self.frames[n] = self.load(path) if path.exists() else self.frames[fallback]
         # animated walk: walk_f01.png, walk_f02.png, ... (from the video)
         self.walk_frames = []
-        i = 1
-        while (SPRITES / f"walk_f{i:02d}.png").exists():
-            key = f"walk@{i - 1}"
-            self.frames[key] = self.load(SPRITES / f"walk_f{i:02d}.png")
+        for num, path in self.numbered("walk"):
+            key = f"walk@{num - 1}"
+            self.frames[key] = self.load(path)
             self.walk_frames.append(key)
-            i += 1
         # other animations from ANIMS (missing files = that animation is skipped)
         self.anims = {}
         for prefix in ANIMS:
             keyname = "landf" if prefix == "land" else prefix
             keys = []
-            i = 1
-            while (SPRITES / f"{prefix}_f{i:02d}.png").exists():
-                key = f"{keyname}@{i - 1}"
-                self.frames[key] = self.load(SPRITES / f"{prefix}_f{i:02d}.png")
+            for num, path in self.numbered(prefix):         # gaps are fine: deleted frames are just skipped
+                key = f"{keyname}@{num - 1}"                # keeps the original frame number
+                self.frames[key] = self.load(path)
                 keys.append(key)
-                i += 1
             if keys:
                 self.anims[prefix] = keys
-        for n in list(self.frames):
-            self.frames[n + "_L"] = self.frames[n].transformed(QTransform().scale(-1, 1))
+        # climb_lift.txt: how strongly each climb frame pulls her up (so she rises with her arms, not a smooth slide)
+        self.climb_lift = []
+        try:
+            self.climb_lift = [float(v) for v in (SPRITES / "climb_lift.txt").read_text().split()]
+        except (OSError, ValueError):
+            pass
+        # climbtop_path.txt: where the window's corner is in each climb-over frame, so she moves exactly with it
+        self.top_path, self.top_end, self.top_exit = [], None, None
+        try:
+            for line in (SPRITES / "climbtop_path.txt").read_text().splitlines():
+                parts = line.split()
+                if not parts or parts[0].startswith("#"):
+                    continue
+                if parts[0] == "end":
+                    self.top_end = (float(parts[1]), float(parts[2]))
+                elif parts[0] == "exit":                   # last climbing-loop frame before the climb-over
+                    self.top_exit = int(parts[1])
+                else:
+                    self.top_path.append((float(parts[0]), float(parts[1])))
+        except (OSError, ValueError, IndexError):
+            self.top_path, self.top_end = [], None
+        for n in list(self.frames):                 # mirrored copies, only for poses that face a direction
+            if n.split("@")[0] in FACES_DIRECTION:
+                self.frames[n + "_L"] = self.frames[n].transformed(QTransform().scale(-1, 1))
 
         # ---- screen ----
         screen = QGuiApplication.primaryScreen()
@@ -186,6 +213,8 @@ class Pet(QWidget):
         self.clicks = []
         self.pounce_next = False
         self.pending_jump = None
+        self.climb = None
+        self.climb_next = False
         self.drag_mode = "a"
         self.drag_t0 = 0
         self.shake = 0.0
@@ -212,9 +241,21 @@ class Pet(QWidget):
 
     # ---------- helpers ----------
     @staticmethod
+    def numbered(prefix):
+        """All sprites/<prefix>_fNN.png files in number order, as (number, path)."""
+        found = []
+        for path in SPRITES.glob(f"{prefix}_f*.png"):
+            digits = path.stem[len(prefix) + 2:]
+            if digits.isdigit():
+                found.append((int(digits), path))
+        return sorted(found)
+
+    @staticmethod
     def load(path):
         pm = QPixmap(str(path))
-        return pm.scaled(SIZE, SIZE, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        # scale by width, so taller frames (extra room above her head) keep the same size as the rest
+        return pm.scaled(SIZE, round(pm.height() * SIZE / max(pm.width(), 1)),
+                         Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
 
     def now_ms(self):
         return self.t * TICK_MS
@@ -294,7 +335,7 @@ class Pet(QWidget):
 
     def command(self, fn):
         """Run a menu action only when she is not in the air or being held."""
-        if self.state not in ("fall", "jump") and not self.dragging:
+        if self.state not in BUSY and not self.dragging:
             fn()
 
     def next_state(self):
@@ -303,10 +344,13 @@ class Pet(QWidget):
             self.set_state("idle", 1500, 3000)       # stay put while you talk to her
             return
         r = random.random()
-        if r < 0.27:
+        if r < 0.25:
             self.start_walk()
-        elif r < 0.49:
+        elif r < 0.40:
             if not self.start_hop():
+                self.start_walk()
+        elif r < 0.52:                                   # about 1 time in 8: climb a window
+            if not self.start_climb() and not self.start_hop():
                 self.start_walk()
         elif r < 0.55:
             self.start_stalk()
@@ -353,6 +397,7 @@ class Pet(QWidget):
             return
         self.step_off = False
         self.pounce_next = False
+        self.climb_next = False
         self.speed = WALK_SPEED * (2.4 if random.random() < 0.25 else 1.0)   # sometimes a dash
         if self.plat_id and random.random() < 0.3:
             self.step_off = True                         # walk to the edge and drop off
@@ -378,6 +423,9 @@ class Pet(QWidget):
             elif self.pounce_next:
                 self.pounce_next = False
                 self.set_state("pounce", 900, 900)
+            elif self.climb_next:
+                self.climb_next = False
+                self.begin_climb()
             else:
                 self.set_state("idle", 500, 1500)
             return
@@ -385,6 +433,150 @@ class Pet(QWidget):
         self.cx = clamp(self.cx + self.speed * self.facing, lo, hi)
         if self.plat_id:
             self.plat_off = self.cx - p["left"]
+        self.sync_window()
+
+    # ---------- climbing up the side of a window ----------
+    def climb_target_feet(self, p):
+        """Her feet height when the climb-over begins (or the window top if there's no climb-over)."""
+        if self.has_climbtop():
+            v = self.top_path[self.frame_no(self.anims["climbtop"][0])][1]
+            return p["top"] + SIZE - FEET_PAD - v * SIZE / 413
+        return p["top"] + CLIMB_TOP
+
+    def start_climb(self):
+        if self.plat_id != 0 or "climb" not in self.anims:
+            return False
+        floor = self.floor["top"]
+        lo, hi = self.span(self.floor)
+        options = []
+        for p in self.platforms:
+            if p["id"] == 0:
+                continue
+            start = min(floor, p["bottom"] + CLIMB_REACH)    # where she starts: the floor, or jumps up to here
+            if floor - start > CLIMB_JUMP or start - self.climb_target_feet(p) < 40:
+                continue                                   # too high to jump to, or too short to be worth climbing
+            for side, edge in (("L", p["left"]), ("R", p["right"])):
+                x = edge - CLIMB_HAND if side == "L" else edge + CLIMB_HAND
+                if lo <= x <= hi and not self.covered(p, edge + (8 if side == "L" else -8)):
+                    options.append((p, side, x, start))
+        if not options:
+            return False
+        p, side, x, start = random.choice(options)
+        self.start_walk()
+        self.step_off = False
+        self.walk_target = x
+        self.climb = dict(pid=p["id"], side=side, scale=1.0, final=False, need_wrap=False, last_frame=-1,
+                          start=start)
+        self.climb_next = True
+        return True
+
+    def begin_climb(self):
+        """At the foot of the window: start climbing, or jump up and grab its side first."""
+        self.facing = 1 if self.climb["side"] == "L" else -1   # face the wall
+        start = self.climb["start"]
+        if self.feet - start < 10:
+            self.state = "climb"
+            return
+        dist = self.feet - start
+        self.jump = dict(sx=self.cx, sy=self.feet, tx=self.cx, ty=start, pid=self.climb["pid"],
+                         t0=self.now_ms(), dur=clamp(450 + dist * 1.2, 600, 1000), h=40.0, grab=True)
+        self.state = "jump"
+
+    @staticmethod
+    def frame_no(key):
+        return int(key.split("@")[1])                       # original frame number (0-based)
+
+    def has_climbtop(self):
+        return ("climbtop" in self.anims and self.top_end is not None
+                and all(self.frame_no(k) < len(self.top_path) for k in self.anims["climbtop"]))
+
+    def corner_to_her(self, p, u, v):
+        """Where she must be (cx, feet) so sprite pixel (u, v) lands on the window's top corner."""
+        k = SIZE / 413
+        if self.climb["side"] == "L":
+            cx = p["left"] + SIZE / 2 - u * k
+        else:                                              # mirrored sprite on the right side
+            cx = p["right"] + SIZE / 2 - (413 - u) * k
+        feet = p["top"] + SIZE - FEET_PAD - v * k
+        return cx, feet
+
+    def step_climb(self):
+        p = self.find_platform(self.climb["pid"]) if self.climb else None
+        if p is None:
+            self.start_fall()                               # the window closed under her hands
+            return
+        c = self.climb
+        left = c["side"] == "L"
+        self.cx = p["left"] - CLIMB_HAND if left else p["right"] + CLIMB_HAND
+        keys = self.anims.get("climb", [])
+        total = len(self.climb_lift) or (max(map(self.frame_no, keys)) + 1 if keys else 0)
+        lift, frame = 1.0, 0
+        if keys:
+            frame = self.frame_no(self.anim_frame("climb", self.now_ms() - self.state_t0))
+            if frame < len(self.climb_lift):
+                lift = self.climb_lift[frame]
+        wrapped = frame < c["last_frame"] or c["last_frame"] < 0   # just started, or a cycle just finished
+        c["last_frame"] = frame
+        if self.has_climbtop():
+            end = self.top_exit + 1 if self.top_exit is not None else total - CLIMB_BLEND   # where the climb-over takes over
+            if wrapped and c["final"]:
+                c["need_wrap"] = False
+            if c["final"] and not c["need_wrap"] and frame >= end:
+                self.climb_over(p)                          # hand over to the climb-over animation
+                return
+            if wrapped and not c["final"]:
+                _, target = self.corner_to_her(p, *self.top_path[self.frame_no(self.anims["climbtop"][0])])
+                def rise(frames):                           # how far a run of climb frames lifts her
+                    lifts = [self.climb_lift[f] if f < len(self.climb_lift) else 1.0 for f in frames]
+                    return CLIMB_SPEED * sum(lifts) * 30 / ANIMS["climb"][0]
+                nums = list(map(self.frame_no, keys))
+                to_exit = rise(f for f in nums if f < end)            # from the loop start to the exit frame
+                full = rise(nums)                                     # one whole loop
+                left_to_go = self.feet - target
+                if left_to_go <= to_exit * 1.5:            # arrive this pass: stretch it to land exactly
+                    c["final"], c["need_wrap"] = True, False
+                    c["scale"] = max(left_to_go, 0) / max(to_exit, 0.01)
+                elif left_to_go <= (full + to_exit) * 1.2:  # one more full loop, then the exit
+                    c["final"], c["need_wrap"] = True, True
+                    c["scale"] = left_to_go / (full + to_exit)
+        self.feet -= CLIMB_SPEED * lift * c["scale"]
+        if p["top"] > self.feet or p["bottom"] < self.feet - 150:
+            self.start_fall()                               # the window moved away from her
+            return
+        if not self.has_climbtop() and self.feet <= p["top"] + CLIMB_TOP:
+            tx = p["left"] + 50 if left else p["right"] - 50
+            self.climb = None
+            self.begin_jump(p, tx, soft=True)               # no climb-over animation: small hop up
+            return
+        self.sync_window()
+
+    def climb_over(self, p):
+        self.cx, self.feet = self.corner_to_her(p, *self.top_path[self.frame_no(self.anims["climbtop"][0])])
+        self.state = "climbtop"
+        self.state_t0 = self.now_ms()
+        self.prev_state = "climbtop"
+        self.sync_window()
+
+    def step_climbtop(self):
+        p = self.find_platform(self.climb["pid"]) if self.climb else None
+        if p is None:
+            self.start_fall()
+            return
+        el = self.now_ms() - self.state_t0
+        keys = self.anims["climbtop"]
+        n = len(keys)
+        i = min(int(el * ANIMS["climbtop"][0] / 1000), n - 1)
+        self.cx, self.feet = self.corner_to_her(p, *self.top_path[self.frame_no(keys[i])])
+        if el * ANIMS["climbtop"][0] / 1000 >= n:           # finished: she's standing on top
+            old = (self.current_frame(), self.x(), self.y())
+            body_u, _ = self.top_end
+            k = SIZE / 413
+            u = body_u if self.climb["side"] == "L" else 413 - body_u
+            self.cx = self.cx - SIZE / 2 + u * k
+            self.climb = None
+            self.land_on(p, soft=True)                       # stands on the window, then idles
+            self.xfade = (old[0], self.now_ms(), old[1] - self.x(), old[2] - self.y())
+            return
         self.sync_window()
 
     # ---------- falling ----------
@@ -397,7 +589,7 @@ class Pet(QWidget):
         self.vy = vy
         self.state = "fall"
 
-    def land_on(self, p):
+    def land_on(self, p, soft=False):
         self.land_kind = self.state          # "jump" or "fall": picks the right stand-in landing pose
         self.plat_id = p["id"]
         self.feet = p["top"]
@@ -407,7 +599,10 @@ class Pet(QWidget):
             ms = int(clamp(len(self.anims["land"]) * 1000 / ANIMS["land"][0], 250, 2500))
         else:
             ms = 250
-        self.set_state("land", ms, ms)
+        if soft:
+            self.set_state("idle", 800, 1500)        # a gentle step up after climbing: no big landing
+        else:
+            self.set_state("land", ms, ms)
         self.sync_window()
 
     def step_fall(self):
@@ -448,13 +643,16 @@ class Pet(QWidget):
                     return True
         return False
 
-    def begin_jump(self, p, tx):
+    def begin_jump(self, p, tx, soft=False):
         dist = math.hypot(tx - self.cx, p["top"] - self.feet)
         self.jump = dict(
             sx=self.cx, sy=self.feet, tx=tx, ty=p["top"], pid=p["id"],
             t0=self.now_ms(), dur=clamp(450 + dist * 0.9, 600, 1800),
-            h=max(70.0, abs(p["top"] - self.feet) * 0.4 + 70.0),
+            h=max(70.0, abs(p["top"] - self.feet) * 0.4 + 70.0), soft=soft,
         )
+        if soft:                                  # small pull-up over the edge, not a big leap
+            self.jump["h"] = 30.0
+            self.jump["dur"] = 450
         self.facing = 1 if tx > self.cx else -1
         self.plat_id = 0
         self.state = "jump"
@@ -465,12 +663,20 @@ class Pet(QWidget):
         if u >= 1:
             self.jump = None
             p = self.find_platform(j["pid"])
+            if j.get("grab"):                               # jumped up to grab a window's side
+                if p is None or self.climb is None:
+                    self.start_fall()
+                    return
+                self.feet = j["ty"]
+                self.state = "climb"
+                self.sync_window()
+                return
             if p is None:
                 self.cx, self.feet = j["tx"], j["ty"]
                 self.start_fall()
             else:
                 self.cx = clamp(j["tx"], p["left"] + 10, p["right"] - 10) if p["id"] else j["tx"]
-                self.land_on(p)
+                self.land_on(p, soft=j.get("soft", False))
             return
         self.cx = j["sx"] + (j["tx"] - j["sx"]) * u
         self.feet = j["sy"] + (j["ty"] - j["sy"]) * u - 4 * j["h"] * u * (1 - u)
@@ -479,7 +685,7 @@ class Pet(QWidget):
     # ---------- the heartbeat ----------
     def tick(self):
         self.t += 1
-        interval = 4 if (self.plat_id or self.state == "jump") else 12
+        interval = 4 if (self.plat_id or self.state in ("jump", "climb", "climbtop")) else 12
         if self.t % interval == 0 and not self.dragging:
             self.refresh_platforms()
 
@@ -501,6 +707,10 @@ class Pet(QWidget):
             self.step_jump()
         elif self.state == "walk":
             self.step_walk()
+        elif self.state == "climb":
+            self.step_climb()
+        elif self.state == "climbtop":
+            self.step_climbtop()
         elif self.now_ms() >= self.state_until:
             if self.state == "crouch":
                 self.finish_crouch()
@@ -523,7 +733,7 @@ class Pet(QWidget):
 
     def set_drag_mode(self, mode, fade=False):
         if fade:
-            self.xfade = (self.current_frame(), self.now_ms())
+            self.xfade = (self.current_frame(), self.now_ms(), 0, 0)
         self.drag_mode = mode
         self.drag_t0 = self.now_ms()
 
@@ -603,6 +813,10 @@ class Pet(QWidget):
         if s == "walk":
             return "walk" if (ms // (180 if self.speed <= WALK_SPEED else 100)) % 2 == 0 else "walk_2"
         elapsed = ms - self.state_t0
+        if s == "climb":
+            return self.anim_frame("climb", elapsed) if "climb" in self.anims else "climb"
+        if s == "climbtop" and "climbtop" in self.anims:
+            return self.anim_frame("climbtop", elapsed)
         if s == "crouch":
             return self.anim_frame("crouch", elapsed) if "crouch" in self.anims else "land"
         if s == "jump" and self.jump is not None:
@@ -660,7 +874,7 @@ class Pet(QWidget):
             p.rotate(self.sway + math.sin(sec * 3) * 3)
             p.drawPixmap(-SIZE // 2, 0, pm)
             if self.xfade is not None:                      # fade out the previous animation's frame
-                old, t0 = self.xfade
+                old, t0, _, _ = self.xfade
                 k = (self.now_ms() - t0) / XFADE_MS
                 if k >= 1:
                     self.xfade = None
@@ -684,7 +898,15 @@ class Pet(QWidget):
             bob = 0
         else:
             bob = math.sin(sec * 2) * 2     # gentle breathing
-        p.drawPixmap(0, int(HEADROOM + bob), pm)
+        p.drawPixmap(0, int(HEADROOM + SIZE - pm.height() + bob), pm)   # feet always at the same spot
+        if self.xfade is not None:                          # fade out the last frame of the previous animation
+            old, t0, dx, dy = self.xfade
+            k = (self.now_ms() - t0) / (XFADE_MS * 2)
+            if k >= 1:
+                self.xfade = None
+            else:
+                p.setOpacity(1 - k)
+                p.drawPixmap(int(dx), int(HEADROOM + SIZE - old.height() + dy), old)
 
     # ---------- mouse ----------
     def mousePressEvent(self, e):
@@ -783,7 +1005,7 @@ class Pet(QWidget):
         self.history.append({"role": "user", "content": text})
         self.chat.add_user(text)
         self.chat.set_busy(True)
-        if self.state not in ("fall", "jump") and not self.dragging:
+        if self.state not in BUSY and not self.dragging:
             self.set_state("phone", 120000, 120000)          # "typing a reply"
 
         thread = QThread()
@@ -808,7 +1030,7 @@ class Pet(QWidget):
         brain.save_history(self.history)
         self.chat.set_reply(clean)
         self.chat.set_busy(False)
-        if self.state not in ("fall", "jump") and not self.dragging:
+        if self.state not in BUSY and not self.dragging:
             self.set_state(MOOD_STATE.get(mood, "wave"), 3500, 3500)
         if self.chat.isVisible():
             self.chat.input.setFocus()
@@ -830,6 +1052,7 @@ class Pet(QWidget):
         menu.addAction("Wave", lambda: self.command(lambda: self.set_state("wave", 2600, 2600)))
         menu.addAction("Walk somewhere", lambda: self.command(self.start_walk))
         menu.addAction("Hop to a window", lambda: self.command(self.start_hop))
+        menu.addAction("Climb a window", lambda: self.command(self.start_climb))
         menu.addAction("Sit", lambda: self.command(lambda: self.set_state("sit", 8000, 12000)))
         menu.addAction("Sleep", lambda: self.command(lambda: self.set_state("sleepy", 3000, 4000)))
         menu.addAction("Phone break", lambda: self.command(lambda: self.set_state("phone", 8000, 12000)))

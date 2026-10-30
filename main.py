@@ -70,6 +70,7 @@ ANIMS = {
     "drag": (24, "loop"),         # dangling while you hold her
     "climb": (36, "loop"),        # climbing up the side of a window
     "climbtop": (36, "once"),     # reaching the top, climbing over and standing up
+    "idle": (24, "loop"),         # standing around: breathing, a blink, a glance (from the idle video)
     "pounce": (24, "once"),       # sneak, wiggle, leap and catch (walks forward by itself, see pounce_path.txt)
     "dragbin": (24, "once"),      # shake her: she starts to panic
     "dragb": (24, "loop"),        # panicking while you keep shaking
@@ -911,6 +912,8 @@ class Pet(QWidget):
             return "sit_edge" if self.plat_id else "sit"
         if s == "music":
             return "sing" if (ms // 4000) % 2 == 0 else "headbang"
+        if s == "idle" and "idle" in self.anims:
+            return self.anim_frame("idle", elapsed)          # the video already breathes and blinks
         if s == "idle" and ms < self.blink_until:
             return "blink"
         return s
@@ -953,7 +956,7 @@ class Pet(QWidget):
             bob = -abs(math.sin(sec * 6)) * 5
         elif self.state == "sleep":
             bob = math.sin(sec * 1.2) * 1.5
-        elif self.state in NO_BOB:
+        elif self.state in NO_BOB or (self.state == "idle" and "idle" in self.anims):
             bob = 0
         else:
             bob = math.sin(sec * 2) * 2     # gentle breathing

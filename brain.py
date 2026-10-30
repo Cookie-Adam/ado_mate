@@ -10,7 +10,7 @@ from PySide6.QtCore import QObject, Signal
 
 # ------------------------------------------------------------------ settings
 HOST = "http://localhost:11434"
-MODEL = "qwen2.5:7b"        # laptop / weak PC: "qwen2.5:3b". Run:  ollama pull <model>
+MODEL = "gemma3:12b"        # laptop / weak PC: "qwen2.5:3b". Run:  ollama pull <model>
 MAX_TURNS = 16              # how many recent messages she remembers
 HISTORY_FILE = Path(__file__).parent / "chat_history.json"
 

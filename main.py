@@ -73,7 +73,8 @@ ANIMS = {
     "climb": (36, "loop"),        # climbing up the side of a window
     "climbtop": (36, "once"),     # reaching the top, climbing over and standing up
     "idle": (24, "loop"),
-    "laughing": (30, "once"),     # reactions: each one plays once from standing back to standing         # standing around: breathing, a blink, a glance (from the idle video)
+    "laughing": (30, "once"),     # reactions: each one plays once from standing back to standing
+    "wave": (30, "once"),         # standing around: breathing, a blink, a glance (from the idle video)
     "pounce": (24, "once"),       # sneak, wiggle, leap and catch (walks forward by itself, see pounce_path.txt)
     "dragbin": (24, "once"),      # shake her: she starts to panic
     "dragb": (24, "loop"),        # panicking while you keep shaking

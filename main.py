@@ -55,6 +55,8 @@ MOOD_STATE = {
     "surprised": "surprised", "sleepy": "sleepy", "smug": "chaos",
     "sing": "music", "neutral": "wave",
 }
+# reaction states: when sprites/<name>_fNN.png exist, the state lasts exactly as long as its animation
+REACTIONS = ("laughing", "wave", "surprised", "annoyed", "rage", "blushing", "chaos", "stretch", "sleepy")
 BUSY = ("fall", "jump", "climb", "climbtop")   # moving through the air / on a wall: clicks and moods wait
 NO_BOB = ("fall", "jump", "land", "crouch", "climb", "climbtop", "peek", "lie_down", "pounce")
 FACES_DIRECTION = {"walk", "walk_2", "jump", "sit_edge", "crouch", "air", "climb", "climbtop", "pounce"}   # mirrored when facing left
@@ -70,7 +72,8 @@ ANIMS = {
     "drag": (24, "loop"),         # dangling while you hold her
     "climb": (36, "loop"),        # climbing up the side of a window
     "climbtop": (36, "once"),     # reaching the top, climbing over and standing up
-    "idle": (24, "loop"),         # standing around: breathing, a blink, a glance (from the idle video)
+    "idle": (24, "loop"),
+    "laughing": (30, "once"),     # reactions: each one plays once from standing back to standing         # standing around: breathing, a blink, a glance (from the idle video)
     "pounce": (24, "once"),       # sneak, wiggle, leap and catch (walks forward by itself, see pounce_path.txt)
     "dragbin": (24, "once"),      # shake her: she starts to panic
     "dragb": (24, "loop"),        # panicking while you keep shaking
@@ -346,6 +349,12 @@ class Pet(QWidget):
 
     # ---------- state machine ----------
     def set_state(self, name, min_ms, max_ms):
+        if name in REACTIONS and name in getattr(self, "anims", {}):
+            min_ms = max_ms = int(len(self.anims[name]) * 1000 / ANIMS[name][0])   # play the whole thing
+            if self.state == name:
+                self.state_t0 = self.now_ms()                # clicked again: start the laugh over
+            elif hasattr(self, "frames") and not self.dragging:
+                self.xfade = (self.current_frame(), self.now_ms(), 0, 0)   # blend in from the pose she was in
         self.state = name
         self.state_until = self.now_ms() + random.randint(min_ms, max_ms)
 
@@ -863,6 +872,8 @@ class Pet(QWidget):
     def sprite_name(self):
         s = self.state
         ms = self.now_ms()
+        if s in REACTIONS and s in self.anims:
+            return self.anim_frame(s, ms - self.state_t0)
         if s == "wave":
             return "wave" if (ms // 350) % 2 == 0 else "idle"
         if s == "walk" and self.walk_frames:
@@ -956,7 +967,7 @@ class Pet(QWidget):
             bob = -abs(math.sin(sec * 6)) * 5
         elif self.state == "sleep":
             bob = math.sin(sec * 1.2) * 1.5
-        elif self.state in NO_BOB or (self.state == "idle" and "idle" in self.anims):
+        elif self.state in NO_BOB or (self.state in ("idle",) + REACTIONS and self.state in self.anims):
             bob = 0
         else:
             bob = math.sin(sec * 2) * 2     # gentle breathing

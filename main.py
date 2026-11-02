@@ -77,6 +77,7 @@ ANIMS = {
     "wave": (30, "once"),
     "surprised": (30, "once"),
     "annoyed": (30, "once"),      # arms crossed, anger mark, a huff, foot tap
+    "rage": (30, "once"),         # full tantrum: fists up, yelling, stomping, then calms herself down
     "pounce": (24, "once"),       # sneak, wiggle, leap and catch (walks forward by itself, see pounce_path.txt)
     "dragbin": (24, "once"),      # shake her: she starts to panic
     "dragb": (24, "loop"),        # panicking while you keep shaking

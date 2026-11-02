@@ -75,7 +75,8 @@ ANIMS = {
     "idle": (24, "loop"),
     "laughing": (30, "once"),     # reactions: each one plays once from standing back to standing
     "wave": (30, "once"),
-    "surprised": (30, "once"),         # standing around: breathing, a blink, a glance (from the idle video)
+    "surprised": (30, "once"),
+    "annoyed": (30, "once"),      # arms crossed, anger mark, a huff, foot tap
     "pounce": (24, "once"),       # sneak, wiggle, leap and catch (walks forward by itself, see pounce_path.txt)
     "dragbin": (24, "once"),      # shake her: she starts to panic
     "dragb": (24, "loop"),        # panicking while you keep shaking
@@ -357,6 +358,8 @@ class Pet(QWidget):
                 self.state_t0 = self.now_ms()                # clicked again: start the laugh over
             elif hasattr(self, "frames") and not self.dragging:
                 self.xfade = (self.current_frame(), self.now_ms(), 0, 0)   # blend in from the pose she was in
+        elif self.state in REACTIONS and name != self.state and hasattr(self, "frames") and not self.dragging:
+            self.xfade = (self.current_frame(), self.now_ms(), 0, 0)       # blend out of a reaction too
         self.state = name
         self.state_until = self.now_ms() + random.randint(min_ms, max_ms)
 

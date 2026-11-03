@@ -80,6 +80,7 @@ ANIMS = {
     "rage": (30, "once"),         # full tantrum: fists up, yelling, stomping, then calms herself down
     "blushing": (30, "once"),     # flustered: hides her face behind her sleeves, hearts and steam, peeks back out
     "chaos": (30, "once"),        # evil grin, then a purple aura flares up around her while she cackles
+    "stretch": (30, "once"),      # yawns, rubs her eye, big stretch with both arms up, arms out, back to standing
     "pounce": (24, "once"),       # sneak, wiggle, leap and catch (walks forward by itself, see pounce_path.txt)
     "dragbin": (24, "once"),      # shake her: she starts to panic
     "dragb": (24, "loop"),        # panicking while you keep shaking
